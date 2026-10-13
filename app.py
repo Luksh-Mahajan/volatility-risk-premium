@@ -51,6 +51,22 @@ def straddle_cycles(scale: float, delta_vol: str, hedge_every: int) -> pd.Series
     return pd.Series(out).dropna()
 
 
+def _mtime(name: str) -> float:
+    p = PROC / name
+    return p.stat().st_mtime if p.exists() else 0.0
+
+
+@st.cache_data(ttl=3600)
+def load_snap(daily_mtime: float, pos_mtime: float):
+    """Live-snapshot results written by analyze_snapshots.py (None if not available yet)."""
+    daily = pos = None
+    if (PROC / "snapshot_daily.csv").exists():
+        daily = pd.read_csv(PROC / "snapshot_daily.csv", index_col=0, parse_dates=True)
+    if (PROC / "snapshot_position.csv").exists():
+        pos = pd.read_csv(PROC / "snapshot_position.csv", index_col=0, parse_dates=True)
+    return daily, pos
+
+
 def shade_crises(fig):
     for name, (a, b) in CRISES.items():
         fig.add_vrect(x0=a, x1=b, fillcolor="grey", opacity=0.15, line_width=0,
@@ -66,8 +82,9 @@ st.caption("IV term structure, delta-hedged option returns, and the price of vol
            "Free data only: CBOE VIX family, S&P 500 (yfinance), FRED. Index-level and model-based, "
            "not real option quotes.")
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs(
-    ["Term structure", "Variance risk premium", "Hedged returns", "Regimes & regressions", "Notes"])
+tab1, tab2, tab3, tab4, tabL, tab5 = st.tabs(
+    ["Term structure", "Variance risk premium", "Hedged returns", "Regimes & regressions",
+     "Live snapshots", "Notes"])
 
 # ---------------------------------------------------------------- Term structure
 with tab1:
@@ -175,6 +192,54 @@ with tab4:
     r = regs[regs["model"] == model]
     st.dataframe(r[["var", "coef", "se", "t"]].round(4), use_container_width=True, hide_index=True)
     st.caption(f"R² = {r['r2'].iloc[0]:.3f},  n = {int(r['n'].iloc[0]):,}")
+
+# ---------------------------------------------------------------- Live snapshots
+with tabL:
+    snap, pos = load_snap(_mtime("snapshot_daily.csv"), _mtime("snapshot_position.csv"))
+    if snap is None or snap.empty:
+        st.info("No snapshot analysis yet. Once the daily workflow has run and committed "
+                "data/processed/snapshot_daily.csv, real option-chain results appear here automatically.")
+    else:
+        st.caption(f"{len(snap)} snapshot days, {snap.index.min().date()} to {snap.index.max().date()}. "
+                   "Real SPY quotes; IV inverted from mid prices. Small sample: calibration, not evidence of an average return.")
+        g = snap["gap_vix_minus_atm30"].dropna()
+        ratio = snap["ratio_atm30_over_vix"].dropna()
+        sp = snap["straddle_spread_rel"].dropna()
+        sk = snap["skew_95put_minus_atm_30d"].dropna()
+        m = st.columns(5)
+        m[0].metric("Days collected", len(snap))
+        m[1].metric("VIX − ATM30 (vol pts)", f"{g.mean() * 100:.2f}" if len(g) else "n/a")
+        m[2].metric("Measured scale (ATM30/VIX)", f"{ratio.mean():.3f}" if len(ratio) else "n/a",
+                    help="Compare with the sigma = scale x VIX slider in the Hedged returns tab.")
+        m[3].metric("ATM straddle spread", f"{sp.mean() * 100:.2f}%" if len(sp) else "n/a")
+        m[4].metric("Skew 95% put − ATM", f"{sk.mean() * 100:.2f} pts" if len(sk) else "n/a")
+
+        f6 = go.Figure()
+        f6.add_trace(go.Scatter(x=snap.index, y=snap["vix"] * 100, name="VIX", mode="lines+markers"))
+        f6.add_trace(go.Scatter(x=snap.index, y=snap["atm_30d"] * 100, name="Real 30D ATM IV (SPY chain)", mode="lines+markers"))
+        f6.update_layout(title="VIX vs real 30D ATM implied vol (%)", height=360, hovermode="x unified")
+        st.plotly_chart(f6, use_container_width=True)
+
+        f7 = go.Figure()
+        for lab, a, b in [("9D", "vix9d", "atm_9d"), ("3M", "vix3m", "atm_90d"), ("6M", "vix6m", "atm_180d")]:
+            x = (snap[a] - snap[b]).dropna() * 100
+            f7.add_trace(go.Scatter(x=x.index, y=x, name=f"VIX{lab} − ATM {lab}", mode="lines+markers"))
+        f7.add_hline(y=0, line_dash="dash")
+        f7.update_layout(title="Index term structure minus chain-built term structure (vol pts)",
+                         height=320, hovermode="x unified")
+        st.plotly_chart(f7, use_container_width=True)
+
+        if pos is not None and len(pos) > 1:
+            f8 = go.Figure()
+            f8.add_trace(go.Scatter(x=pos.index, y=pos["cum_pnl_mid_pct"], name="Real straddle (marked at mid)"))
+            f8.add_trace(go.Scatter(x=pos.index, y=pos["cum_pnl_synthetic_pct"], name="Synthetic model, same dates"))
+            f8.update_layout(title="Short ATM straddle, delta-hedged: real vs model (cumulative, % of index)",
+                             height=340, hovermode="x unified")
+            st.plotly_chart(f8, use_container_width=True)
+            st.caption("One position, so one data point. Real P&L excludes entry/exit half-spreads; "
+                       "run analyze_snapshots.py for the after-cost figure.")
+        with st.expander("Daily table"):
+            st.dataframe(snap.round(4), use_container_width=True)
 
 # ---------------------------------------------------------------- Notes
 with tab5:

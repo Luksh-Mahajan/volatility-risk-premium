@@ -30,16 +30,19 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install pandas numpy yfinance
+      - run: pip install pandas numpy scipy yfinance
       - name: Take snapshot
         env:
           FORCE: ${{ github.event.inputs.force || '0' }}
         run: python snapshot.py
+      - name: Update analysis (feeds the dashboard)
+        run: python analyze_snapshots.py || echo "Analysis skipped (not enough data yet)"
       - name: Commit new snapshots
         run: |
           git config user.name "snapshot-bot"
           git config user.email "snapshot-bot@users.noreply.github.com"
           git add data/snapshots
+          git add data/processed/snapshot_daily.csv data/processed/snapshot_position.csv 2>/dev/null || true
           if git diff --cached --quiet; then
             echo "No new files."
           else

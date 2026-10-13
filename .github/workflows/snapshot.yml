@@ -1,0 +1,48 @@
+name: Daily option-chain snapshot
+
+on:
+  schedule:
+    # Two entries cover DST: 19:50 UTC = 3:50pm EDT, 20:50 UTC = 3:50pm EST.
+    # snapshot.py only does work inside 15:30-16:25 ET, so exactly one of them runs.
+    # GitHub cron can be delayed by up to ~30-60 min; the window allows for that.
+    - cron: "50 19 * * 1-5"
+    - cron: "50 20 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Ignore the time window (manual test)"
+        required: false
+        default: "0"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: snapshot
+  cancel-in-progress: false
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install pandas numpy yfinance
+      - name: Take snapshot
+        env:
+          FORCE: ${{ github.event.inputs.force || '0' }}
+        run: python snapshot.py
+      - name: Commit new snapshots
+        run: |
+          git config user.name "snapshot-bot"
+          git config user.email "snapshot-bot@users.noreply.github.com"
+          git add data/snapshots
+          if git diff --cached --quiet; then
+            echo "No new files."
+          else
+            git commit -m "snapshot $(date -u +%Y-%m-%dT%H:%MZ)"
+            git push
+          fi
